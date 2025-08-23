@@ -2,18 +2,28 @@ require("dotenv").config();
 const fs = require("fs");
 const express = require("express");
 const { google } = require("googleapis");
-
 const TOKEN_PATH = "./tokens.json";
 
 let lastStatus = {
-  gmail: false,
   idx: false,
   updatedAt: null,
 };
 
 // ==== Helpers ====
 async function loadTokens() {
-  return JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+  if (!fs.existsSync(TOKEN_PATH)) {
+    throw new Error("⚠️ tokens.json chưa tồn tại, cần login Gmail OAuth trước");
+  }
+
+  try {
+    const data = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+    if (!data.refresh_token) {
+      throw new Error("⚠️ tokens.json thiếu refresh_token, cần login lại");
+    }
+    return data;
+  } catch (err) {
+    throw new Error("⚠️ tokens.json lỗi hoặc bị hỏng: " + err.message);
+  }
 }
 
 async function saveTokens(tokens) {
@@ -43,23 +53,20 @@ async function refreshTokens(oAuth2Client) {
   }
 }
 
-// ==== Gmail Check ====
-async function checkGmail(oAuth2Client) {
-  try {
-    const gmail = google.gmail({ version: "v1", auth: oAuth2Client });
-    const res = await gmail.users.labels.list({ userId: "me" });
-    return res.status === 200;
-  } catch {
-    return false;
-  }
-}
-
 // ==== IDX Ping ====
 async function pingIdx(oAuth2Client) {
   try {
     const tokens = oAuth2Client.credentials;
     let res = await fetch(process.env.IDX_URL, {
-      headers: { Authorization: `Bearer ${tokens.access_token}` },
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+      },
     });
 
     if (res.status === 200) return true;
@@ -70,33 +77,42 @@ async function pingIdx(oAuth2Client) {
       if (!newTokens) return false;
 
       res = await fetch(process.env.IDX_URL, {
-        headers: { Authorization: `Bearer ${newTokens.access_token}` },
+        headers: {
+          Authorization: `Bearer ${newTokens.access_token}`,
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36",
+        },
       });
 
       return res.status === 200;
     }
     return false;
-  } catch {
+  } catch (err) {
+    console.error("❌ Lỗi khi ping IDX:", err.message);
     return false;
   }
 }
 
 // ==== Job loop ====
 async function main() {
-  const oAuth2Client = await getOAuth2Client();
+  let oAuth2Client;
+  try {
+    oAuth2Client = await getOAuth2Client();
+  } catch (err) {
+    console.error(err.message);
+    process.exit(1);
+  }
 
   async function job() {
-    const gmailOK = await checkGmail(oAuth2Client);
     const idxOK = await pingIdx(oAuth2Client);
     lastStatus = {
-      gmail: gmailOK,
       idx: idxOK,
       updatedAt: new Date().toISOString(),
     };
-    console.log(`${lastStatus.updatedAt} | Gmail: ${gmailOK ? "🟢" : "❌"} | IDX: ${idxOK ? "🟢" : "❌"}`);
+    console.log(`${lastStatus.updatedAt} | IDX: ${idxOK ? "🟢" : "❌"}`);
   }
 
-  setInterval(job, 60000);
+  setInterval(job, 60000); // check mỗi phút
   await job();
 
   // ==== Express server ====
@@ -107,7 +123,7 @@ async function main() {
       <html>
         <head>
           <meta charset="utf-8" />
-          <title>Status</title>
+          <title>IDX Status</title>
           <style>
             body { font-family: sans-serif; background: #111; color: #eee; text-align: center; padding: 40px; }
             .ok { color: #0f0; }
@@ -116,9 +132,8 @@ async function main() {
           </style>
         </head>
         <body>
-          <h1>Bot Status</h1>
+          <h1>IDX Status</h1>
           <div class="box">
-            <p>📧 Gmail: <span class="${lastStatus.gmail ? "ok" : "fail"}">${lastStatus.gmail ? "🟢 Online" : "❌ Offline"}</span></p>
             <p>🌐 IDX: <span class="${lastStatus.idx ? "ok" : "fail"}">${lastStatus.idx ? "🟢 Online" : "❌ Offline"}</span></p>
             <p><small>⏰ Cập nhật: ${lastStatus.updatedAt || "chưa có"}</small></p>
           </div>
